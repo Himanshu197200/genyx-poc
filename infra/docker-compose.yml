@@ -1,0 +1,90 @@
+version: "3.9"
+
+# ────────────────────────────────────────────────────────────
+#  Genyx POC v2 — local dev stack
+#  Services: broker (Mosquitto+go-auth), db (Postgres+Timescale), backend
+# ────────────────────────────────────────────────────────────
+
+services:
+  # ── MQTT broker with JWT/JWKS auth ────────────────────────
+  broker:
+    image: iegomez/mosquitto-go-auth:latest
+    container_name: genyx-broker
+    restart: unless-stopped
+    ports:
+      - "1883:1883"   # plain MQTT (internal only, anon disabled)
+      - "8883:8883"   # MQTT over TLS
+      - "8884:8884"   # MQTT over WSS (mobile)
+    volumes:
+      - ./mosquitto/mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
+      - ./mosquitto/go-auth.conf:/mosquitto/conf.d/go-auth.conf:ro
+      - ./certs:/mosquitto/certs:ro
+      - broker_data:/mosquitto/data
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - genyx
+
+  # ── Postgres + TimescaleDB ─────────────────────────────────
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: genyx-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       genyx
+      POSTGRES_USER:     genyx
+      POSTGRES_PASSWORD: genyxsecret
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - genyx
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U genyx -d genyx"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Backend (auth-svc) ─────────────────────────────────────
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: genyx-backend
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      PORT:             4000
+      DATABASE_URL:     postgres://genyx:genyxsecret@db:5432/genyx
+      JWT_PRIVATE_KEY_PATH: /keys/jwt-private.pem
+      JWT_PUBLIC_KEY_PATH:  /keys/jwt-public.pem
+      JWT_ISS:          https://auth.genyx.local
+      JWT_KID:          genyx-2026-05
+      GOOGLE_CLIENT_ID:     ${GOOGLE_CLIENT_ID:-changeme}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-changeme}
+      NODE_ENV:         development
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - genyx
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4000/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+volumes:
+  broker_data:
+  db_data:
+
+networks:
+  genyx:
+    driver: bridge
